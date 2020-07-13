@@ -4,8 +4,9 @@
   "description": "A minimal, lightweight and mobile-first starter for creating blazing-fast static blogs",
   "main": "n/a",
   "scripts": {
-    "develop": "yarn run clean && gatsby develop",
-    "build": "yarn run clean && gatsby build",
+    "workflows": "bloga-gatsby workflows",
+    "develop": "yarn run clean && bloga-gatsby init && gatsby develop",
+    "build": "yarn run clean && bloga-gatsby init && gatsby build",
     "deploy": "yarn run clean && gatsby build --prefix-paths && gh-pages -d public",
     "clean": "rimraf .cache public",
     "flow": "flow",
@@ -38,6 +39,8 @@
     "disqus"
   ],
   "dependencies": {
+    "@theowenyoung/gatsby-source-git": "^1.0.8",
+    "bloga-gatsby": "^0.0.22",
     "bluebird": "^3.7.2",
     "classnames": "^2.2.6",
     "codecov": "^3.7.0",

@@ -1,0 +1,302 @@
+name: Upgrade
+on:
+  repository_dispatch:
+    types: [upgrade]
+env:
+  BLOGA_CLIENT_ID: ${{ secrets.BLOGA_CLIENT_ID }}
+  BLOGA_CLIENT_SECRET: ${{ secrets.BLOGA_CLIENT_SECRET }}
+  BLOGA_SITE_CONFIG_URL: ${{ secrets.BLOGA_SITE_CONFIG_URL }}
+  SSH_DEPLOY_KEY: ${{secrets.SSH_DEPLOY_KEY }}
+  UPGRADE_BRANCH: bloga-automated-upgrade
+jobs:
+  init:
+    runs-on: ubuntu-latest
+    # outpus result type is string, true will be "true"
+    outputs:
+      isFirstCommit: ${{ steps.isFirstCommit.outputs.result }}
+      repositoryName: ${{ steps.repositoryName.outputs.result}}
+      sourceBranch: ${{ steps.sourceBranch.outputs.result }}
+      deployBranch: ${{ steps.deployBranch.outputs.result }}
+      isDeployBranchExist: ${{ steps.isDeployBranchExist.outputs.result }}
+      isSourceBranch: ${{ steps.isSourceBranch.outputs.result }}
+      blogaAccessToken: ${{ steps.blogaAccessToken.outputs.result }}
+      blogaSiteId: ${{ steps.blogaSiteId.outputs.result }}
+      pathPrefix: ${{ steps.pathPrefix.outputs.result }}
+      templateRepo: ${{ steps.templateRepo.outputs.result }}
+      templateBranch: ${{ steps.templateBranch.outputs.result }}
+      forceUpdate: ${{ github.event.client_payload.force }}
+    steps:
+      - id: isFirstCommit
+        name: Check is first commit
+        uses: actions/github-script@v2
+        env:
+          COMMIT_MESSAGE: ${{ github.event.commits[0].message }}
+          RUN_NUMBER: ${{ github.run_number }}
+        with:
+          script: return (process.env.RUN_NUMBER == '1')
+          result-encoding: string
+      - id: repositoryName
+        name: get repository name
+        uses: actions/github-script@v2
+        with:
+          script: return context.repo.repo
+          result-encoding: string
+      - id: sourceBranch
+        name: get source branch
+        uses: actions/github-script@v2
+        with:
+          script: |
+            if(context.repo.repo === `${context.repo.owner}.github.io`){
+              return 'source'
+            }else{
+              return 'master'
+            }
+          result-encoding: string
+      - id: deployBranch
+        name: get deploy branch
+        uses: actions/github-script@v2
+        with:
+          script: |
+            if(context.repo.repo === `${context.repo.owner}.github.io`){
+              return 'master'
+            }else{
+              return 'gh-pages'
+            }
+          result-encoding: string
+      - id: isSourceBranch
+        name: get current branch is source branch
+        uses: actions/github-script@v2
+        env:
+          SOURCE_BRANCH: ${{ steps.sourceBranch.outputs.result }}
+        with:
+          script: |
+            if(`refs/heads/${process.env.SOURCE_BRANCH}` === context.ref){
+              return true
+            }else{
+              return false
+            }
+          result-encoding: string
+      - id: isDeployBranchExist
+        name: get is deploy branch exist
+        uses: actions/github-script@v2
+        env:
+          DEPLOY_BRANCH: ${{ steps.deployBranch.outputs.result }}
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            return github.repos.getBranch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              branch: process.env.DEPLOY_BRANCH
+            }).then(data=>{
+              return true;
+            }).catch((e)=>{
+              if(e && e.status===404){
+                // then manual trigger
+                return false
+              }else{
+                core.setFailed('check isDeployBranchExist error: ',e.message)
+              }
+            })
+
+      - id: blogaSiteId
+        name: get bloga site id
+        if: (env.BLOGA_SITE_CONFIG_URL)
+        uses: actions/github-script@v2
+        with:
+          script: |
+            const siteSettingsUrl = process.env.BLOGA_SITE_CONFIG_URL
+            if(siteSettingsUrl){
+              let startIndex = siteSettingsUrl.indexOf('/sites/')
+              const endIndex = siteSettingsUrl.indexOf('/settings')
+              if(startIndex && endIndex){
+                startIndex += 7;
+                const siteId = siteSettingsUrl.substring(startIndex,endIndex)
+                return siteId
+              }else{
+                core.setFailed('can not detect a valid bloga site config url')
+              }
+
+            } else {
+              core.setFailed('can not detect bloga site config url')
+            }
+          result-encoding: string
+      - id: blogaAccessTokenResponse
+        name: get bloga access token response
+        if: (env.BLOGA_CLIENT_ID) && (env.BLOGA_CLIENT_SECRET)
+        uses: CamiloGarciaLaRotta/watermelon-http-client@v1.4
+        with:
+          url: "https://auth.owenyoung.com/api/v1/oauth/token"
+          method: "POST"
+          headers: '{"Content-Type": "application/json"}'
+          data: '{"client_id": "${{ env.BLOGA_CLIENT_ID }}","client_secret": "${{ env.BLOGA_CLIENT_SECRET }}","grant_type":"client_credentials"}'
+      - id: blogaAccessToken
+        name: get bloga access token
+        if: (steps.blogaAccessTokenResponse.outcome == 'success')
+        uses: actions/github-script@v2
+        env:
+          RESPONSE: ${{ steps.blogaAccessTokenResponse.outputs.response }}
+        with:
+          script: |
+            const response = JSON.parse(process.env.RESPONSE)
+            if(response.data.access_token){
+              return response.data.access_token
+            }else{
+              core.setFailed(`Can not get bloga access token`);
+            }
+          result-encoding: string
+      - id: blogaSettingsResponse
+        name: get bloga settings response
+        if: (env.BLOGA_SITE_CONFIG_URL)
+        uses: CamiloGarciaLaRotta/watermelon-http-client@v1.4
+        with:
+          url: ${{ env.BLOGA_SITE_CONFIG_URL }}
+          method: "GET"
+          headers: '{"Content-Type": "application/json"}'
+      - id: pathPrefix
+        name: get path prefix
+        if: steps.blogaSettingsResponse.outcome == 'success'
+        uses: actions/github-script@v2
+        env:
+          RESPONSE: ${{ steps.blogaSettingsResponse.outputs.response }}
+        with:
+          script: |
+            const response = JSON.parse(process.env.RESPONSE)
+            if(response.pathPrefix){
+              return response.pathPrefix
+            }else{
+              return ""
+            }
+          result-encoding: string
+      - id: templateRepo
+        name: get template repo
+        if: steps.blogaSettingsResponse.outcome == 'success'
+        uses: actions/github-script@v2
+        env:
+          RESPONSE: ${{ steps.blogaSettingsResponse.outputs.response }}
+        with:
+          script: |
+            const response = JSON.parse(process.env.RESPONSE)
+            if(response.template_repo){
+              return response.template_repo
+            }else{
+              return ""
+            }
+          result-encoding: string
+      - id: templateBranch
+        name: get template branch
+        if: steps.blogaSettingsResponse.outcome == 'success'
+        uses: actions/github-script@v2
+        env:
+          RESPONSE: ${{ steps.blogaSettingsResponse.outputs.response }}
+        with:
+          script: |
+            const response = JSON.parse(process.env.RESPONSE)
+            if(response.template_branch){
+              return response.template_branch
+            }else{
+              return ""
+            }
+          result-encoding: string
+
+  upgrade:
+    needs: init
+    if: (github.repository != needs.init.outputs.templateRepo)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dump INIT_OUTPUTS
+        run: echo $INIT_OUTPUTS
+        env:
+          INIT_OUTPUTS: ${{ toJson(needs.init.outputs) }}
+      - name: Set up Python
+        uses: actions/setup-python@v1
+        with:
+          python-version: 3.7
+
+      - name: checkout latest tempalte source
+        uses: actions/checkout@v2
+        with:
+          repository: ${{ needs.init.outputs.templateRepo }}
+          ref: ${{ needs.init.outputs.templateBranch }}
+          path: "new_files"
+          persist-credentials: false
+
+      - name: copy this repo's contents
+        uses: actions/checkout@v2
+        with:
+          path: "current_files"
+          persist-credentials: false
+
+      - name: copy new files
+        run: |
+          # remove files you don't want to copy from current version of fastpages
+          cd new_files        
+
+          # copy new files from fastpages into your repo
+          for file in $(ls | egrep -v "(assets|_sass)"); do 
+            if [[ -f "$file" ]] || [[ -d "$file" ]] 
+            then
+              echo "copying $file"; 
+              cp -r $file ../current_files;
+            fi
+          done
+
+          # copy action workflows
+          cp -r .github ../current_files
+      - uses: webfactory/ssh-agent@v0.4.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_DEPLOY_KEY }}
+      - name: commit changes to branch
+        run: |
+          # commit changes
+          cd current_files
+          git config --global user.email "${GH_USERNAME}@users.noreply.github.com"
+          git config --global user.name "${GH_USERNAME}"
+          git remote remove origin
+          git remote add origin "git@github.com:${GITHUB_REPOSITORY}.git"
+
+          git checkout -b $UPGRADE_BRANCH
+          git add -A
+          git commit -m 'upgrade bloga'
+          git push -f -u origin $UPGRADE_BRANCH
+        env:
+          GH_USERNAME: github-actions
+          SOURCE_BRANCH: ${{ needs.init.outputs.sourceBranch }}
+      - name: Open a PR
+        id: pr
+        uses: actions/github-script@v2
+        env:
+          SOURCE_BRANCH: ${{ needs.init.outputs.sourceBranch }}
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            github.pulls.create({
+                          owner: context.repo.owner,
+                          repo: context.repo.repo,
+                          title: '[bloga] Update repo with changes from template',
+                          head: process.env.UPGRADE_BRANCH,
+                          base: process.env.SOURCE_BRANCH,
+                          body: `test body content`
+                          })
+                        .then(result => console.log(`::set-output name=pull_number::${result.data.number}`))
+      - name: Merge the pr
+        if: needs.init.outputs.forceUpdate == 'true'
+        id: mergePr
+        uses: actions/github-script@v2
+        env:
+          PULL_NUMBER: ${{ steps.pr.outputs.pull_number }}
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            return github.pulls.merge({
+                          owner: context.repo.owner,
+                          repo: context.repo.repo,
+                          pull_number: process.env.PULL_NUMBER,
+                          })
+      - name: Trigger redeploy
+        if: ${{ steps.mergePr.outcome == 'success' }}
+        uses: CamiloGarciaLaRotta/watermelon-http-client@v1.4
+        with:
+          url: "https://api.bloga.owenyoung.com/api/v1/sites/${{ needs.init.outputs.blogaSiteId }}/deploys"
+          method: "POST"
+          headers: '{"Content-Type": "application/json","Authorization":"Bearer ${{ needs.init.outputs.blogaAccessToken }}"}'
